@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -20,14 +20,19 @@ import java.io.Serializable;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.Charset;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.StandardCharsets;
 import java.text.DecimalFormat;
 import java.text.DecimalFormatSymbols;
-import java.text.ParseException;
-import java.text.SimpleDateFormat;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Date;
 import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
@@ -36,11 +41,11 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
-import java.util.TimeZone;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
+import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.LinkedCaseInsensitiveMap;
 import org.springframework.util.MultiValueMap;
@@ -70,6 +75,10 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 
 	private static final long serialVersionUID = -8578554704772377436L;
 
+	/**
+	 * The empty {@code HttpHeaders} instance (immutable).
+	 */
+	public static final HttpHeaders EMPTY = new HttpHeaders(new LinkedHashMap<>(), true);
 	/**
 	 * The HTTP {@code Accept} header field name.
 	 * @see <a href="http://tools.ietf.org/html/rfc7231#section-5.3.2">Section 5.3.2 of RFC 7231</a>
@@ -166,7 +175,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 */
 	public static final String CONTENT_ENCODING = "Content-Encoding";
 	/**
-	 * The HTTP {@code Content-Disposition} header field name
+	 * The HTTP {@code Content-Disposition} header field name.
 	 * @see <a href="http://tools.ietf.org/html/rfc6266">RFC 6266</a>
 	 */
 	public static final String CONTENT_DISPOSITION = "Content-Disposition";
@@ -372,27 +381,29 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	public static final String WWW_AUTHENTICATE = "WWW-Authenticate";
 
 	/**
-	 * Date formats as specified in the HTTP RFC
-	 * @see <a href="https://tools.ietf.org/html/rfc7231#section-7.1.1.1">Section 7.1.1.1 of RFC 7231</a>
-	 */
-	private static final String[] DATE_FORMATS = new String[] {
-			"EEE, dd MMM yyyy HH:mm:ss zzz",
-			"EEE, dd-MMM-yy HH:mm:ss zzz",
-			"EEE MMM dd HH:mm:ss yyyy"
-	};
-
-	/**
-	 * Pattern matching ETag multiple field values in headers such as "If-Match", "If-None-Match"
+	 * Pattern matching ETag multiple field values in headers such as "If-Match", "If-None-Match".
 	 * @see <a href="https://tools.ietf.org/html/rfc7232#section-2.3">Section 2.3 of RFC 7232</a>
 	 */
 	private static final Pattern ETAG_HEADER_VALUE_PATTERN = Pattern.compile("\\*|\\s*((W\\/)?(\"[^\"]*\"))\\s*,?");
 
 	private static final DecimalFormatSymbols DECIMAL_FORMAT_SYMBOLS = new DecimalFormatSymbols(Locale.ENGLISH);
 
-	private static TimeZone GMT = TimeZone.getTimeZone("GMT");
+	private static final ZoneId GMT = ZoneId.of("GMT");
+
+	/**
+	 * Date formats with time zone as specified in the HTTP RFC.
+	 * @see <a href="https://tools.ietf.org/html/rfc7231#section-7.1.1.1">Section 7.1.1.1 of RFC 7231</a>
+	 */
+	private static final DateTimeFormatter[] DATE_FORMATTERS = new DateTimeFormatter[] {
+			DateTimeFormatter.RFC_1123_DATE_TIME,
+			DateTimeFormatter.ofPattern("EEEE, dd-MMM-yy HH:mm:ss zz", Locale.US),
+			DateTimeFormatter.ofPattern("EEE MMM dd HH:mm:ss yyyy",Locale.US).withZone(GMT)
+	};
 
 
 	private final Map<String, List<String>> headers;
+
+	private final boolean readOnly;
 
 
 	/**
@@ -406,19 +417,15 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * Private constructor that can create read-only {@code HttpHeader} instances.
 	 */
 	private HttpHeaders(Map<String, List<String>> headers, boolean readOnly) {
-		Assert.notNull(headers, "'headers' must not be null");
 		if (readOnly) {
-			Map<String, List<String>> map =
-					new LinkedCaseInsensitiveMap<>(headers.size(), Locale.ENGLISH);
-			for (Entry<String, List<String>> entry : headers.entrySet()) {
-				List<String> values = Collections.unmodifiableList(entry.getValue());
-				map.put(entry.getKey(), values);
-			}
+			Map<String, List<String>> map = new LinkedCaseInsensitiveMap<>(headers.size(), Locale.ENGLISH);
+			headers.forEach((key, valueList) -> map.put(key, Collections.unmodifiableList(valueList)));
 			this.headers = Collections.unmodifiableMap(map);
 		}
 		else {
 			this.headers = headers;
 		}
+		this.readOnly = readOnly;
 	}
 
 
@@ -457,47 +464,45 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	}
 
 	/**
-	 * Return the acceptable language ranges from the
-	 * {@literal Accept-Language} header
-	 * <p>If you only need the most preferred locale use
-	 * {@link #getAcceptLanguageAsLocale()} or if you need to filter based on
-	 * a list of supporeted locales you can pass the returned list to
+	 * Return the language ranges from the {@literal "Accept-Language"} header.
+	 * <p>If you only need sorted, preferred locales only use
+	 * {@link #getAcceptLanguageAsLocales()} or if you need to filter based on
+	 * a list of supported locales you can pass the returned list to
 	 * {@link Locale#filter(List, Collection)}.
+	 * @throws IllegalArgumentException if the value cannot be converted to a language range
 	 * @since 5.0
 	 */
 	public List<Locale.LanguageRange> getAcceptLanguage() {
 		String value = getFirst(ACCEPT_LANGUAGE);
-		if (value != null) {
-			return Locale.LanguageRange.parse(value);
-		}
-		return Collections.emptyList();
+		return (StringUtils.hasText(value) ? Locale.LanguageRange.parse(value) : Collections.emptyList());
 	}
 
 	/**
-	 * A variant of {@link #setAcceptLanguage(List)} that sets the {@literal Accept-Language}
-	 * header value to the specified locale.
+	 * Variant of {@link #setAcceptLanguage(List)} using {@link Locale}'s.
 	 * @since 5.0
 	 */
-	public void setAcceptLanguageAsLocale(Locale locale) {
-		setAcceptLanguage(Collections.singletonList(new Locale.LanguageRange(locale.toLanguageTag())));
+	public void setAcceptLanguageAsLocales(List<Locale> locales) {
+		setAcceptLanguage(locales.stream()
+				.map(locale -> new Locale.LanguageRange(locale.toLanguageTag()))
+				.collect(Collectors.toList()));
 	}
 
 	/**
 	 * A variant of {@link #getAcceptLanguage()} that converts each
-	 * {@link java.util.Locale.LanguageRange} to a {@link Locale} and returns
-	 * the first one on the list.
+	 * {@link java.util.Locale.LanguageRange} to a {@link Locale}.
+	 * @return the locales or an empty list
+	 * @throws IllegalArgumentException if the value cannot be converted to a locale
 	 * @since 5.0
 	 */
-	public Locale getAcceptLanguageAsLocale() {
+	public List<Locale> getAcceptLanguageAsLocales() {
 		List<Locale.LanguageRange> ranges = getAcceptLanguage();
 		if (ranges.isEmpty()) {
-			return null;
+			return Collections.emptyList();
 		}
 		return ranges.stream()
 				.map(range -> Locale.forLanguageTag(range.getRange()))
 				.filter(locale -> StringUtils.hasText(locale.getDisplayName()))
-				.findFirst()
-				.orElse(null);
+				.collect(Collectors.toList());
 	}
 
 	/**
@@ -556,13 +561,14 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	/**
 	 * Set the (new) value of the {@code Access-Control-Allow-Origin} response header.
 	 */
-	public void setAccessControlAllowOrigin(String allowedOrigin) {
+	public void setAccessControlAllowOrigin(@Nullable String allowedOrigin) {
 		set(ACCESS_CONTROL_ALLOW_ORIGIN, allowedOrigin);
 	}
 
 	/**
 	 * Return the value of the {@code Access-Control-Allow-Origin} response header.
 	 */
+	@Nullable
 	public String getAccessControlAllowOrigin() {
 		return getFieldValues(ACCESS_CONTROL_ALLOW_ORIGIN);
 	}
@@ -614,13 +620,14 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	/**
 	 * Set the (new) value of the {@code Access-Control-Request-Method} request header.
 	 */
-	public void setAccessControlRequestMethod(HttpMethod requestMethod) {
-		set(ACCESS_CONTROL_REQUEST_METHOD, requestMethod.name());
+	public void setAccessControlRequestMethod(@Nullable HttpMethod requestMethod) {
+		set(ACCESS_CONTROL_REQUEST_METHOD, (requestMethod != null ? requestMethod.name() : null));
 	}
 
 	/**
 	 * Return the value of the {@code Access-Control-Request-Method} request header.
 	 */
+	@Nullable
 	public HttpMethod getAccessControlRequestMethod() {
 		return HttpMethod.resolve(getFirst(ACCESS_CONTROL_REQUEST_METHOD));
 	}
@@ -702,15 +709,84 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	}
 
 	/**
+	 * Set the value of the {@linkplain #AUTHORIZATION Authorization} header to
+	 * Basic Authentication based on the given username and password.
+	 * <p>Note that Basic Authentication only supports characters in the
+	 * {@link StandardCharsets#ISO_8859_1 ISO-8859-1} character set.
+	 * @param username the username
+	 * @param password the password
+	 * @throws IllegalArgumentException if either {@code user} or
+	 * {@code password} contain characters that cannot be encoded to ISO-8859-1.
+	 * @since 5.1
+	 * @see <a href="https://tools.ietf.org/html/rfc7617">RFC 7617</a>
+	 */
+	public void setBasicAuth(String username, String password) {
+		setBasicAuth(username, password, null);
+	}
+
+	/**
+	 * Set the value of the {@linkplain #AUTHORIZATION Authorization} header to
+	 * Basic Authentication based on the given username and password.
+	 * @param username the username
+	 * @param password the password
+	 * @param charset the charset to use to convert the credentials into an octet
+	 * sequence. Defaults to {@linkplain StandardCharsets#ISO_8859_1 ISO-8859-1}
+	 * @throws IllegalArgumentException if either {@code user} or
+	 * {@code password} contain characters that cannot be encoded to ISO-8859-1.
+	 * @since 5.1
+	 * @see <a href="https://tools.ietf.org/html/rfc7617">RFC 7617</a>
+	 */
+	public void setBasicAuth(String username, String password, @Nullable Charset charset) {
+		Assert.notNull(username, "Username must not be null");
+		Assert.notNull(password, "Password must not be null");
+		if (charset == null) {
+			charset = StandardCharsets.ISO_8859_1;
+		}
+
+		CharsetEncoder encoder = charset.newEncoder();
+		if (!encoder.canEncode(username) || !encoder.canEncode(password)) {
+			throw new IllegalArgumentException(
+					"Username or password contains characters that cannot be encoded to " +
+			charset.displayName());
+		}
+
+		String credentialsString = username + ":" + password;
+		byte[] encodedBytes = Base64.getEncoder().encode(credentialsString.getBytes(charset));
+		String encodedCredentials = new String(encodedBytes, charset);
+		set(AUTHORIZATION, "Basic " + encodedCredentials);
+	}
+
+	/**
+	 * Set the value of the {@linkplain #AUTHORIZATION Authorization} header to
+	 * the given Bearer token.
+	 * @param token the Base64 encoded token
+	 * @since 5.1
+	 * @see <a href="https://tools.ietf.org/html/rfc6750">RFC 6750</a>
+	 */
+	public void setBearerAuth(String token) {
+		set(AUTHORIZATION, "Bearer " + token);
+	}
+
+	/**
+	 * Set a configured {@link CacheControl} instance as the
+	 * new value of the {@code Cache-Control} header.
+	 * @since 5.0.5
+	 */
+	public void setCacheControl(CacheControl cacheControl) {
+		set(CACHE_CONTROL, cacheControl.getHeaderValue());
+	}
+
+	/**
 	 * Set the (new) value of the {@code Cache-Control} header.
 	 */
-	public void setCacheControl(String cacheControl) {
+	public void setCacheControl(@Nullable String cacheControl) {
 		set(CACHE_CONTROL, cacheControl);
 	}
 
 	/**
 	 * Return the value of the {@code Cache-Control} header.
 	 */
+	@Nullable
 	public String getCacheControl() {
 		return getFieldValues(CACHE_CONTROL);
 	}
@@ -737,41 +813,32 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	}
 
 	/**
-	 * Set the (new) value of the {@code Content-Disposition} header
-	 * for {@code form-data}.
+	 * Set the {@code Content-Disposition} header when creating a
+	 * {@code "multipart/form-data"} request.
+	 * <p>Applications typically would not set this header directly but
+	 * rather prepare a {@code MultiValueMap<String, Object>}, containing an
+	 * Object or a {@link org.springframework.core.io.Resource} for each part,
+	 * and then pass that to the {@code RestTemplate} or {@code WebClient}.
 	 * @param name the control name
 	 * @param filename the filename (may be {@code null})
-	 * @see #setContentDisposition(ContentDisposition)
 	 * @see #getContentDisposition()
 	 */
-	public void setContentDispositionFormData(String name, String filename) {
-		setContentDispositionFormData(name, filename, null);
-	}
-
-	/**
-	 * Set the (new) value of the {@code Content-Disposition} header
-	 * for {@code form-data}, optionally encoding the filename using the RFC 5987.
-	 * <p>Only the US-ASCII, UTF-8 and ISO-8859-1 charsets are supported.
-	 * @param name the control name
-	 * @param filename the filename (may be {@code null})
-	 * @param charset the charset used for the filename (may be {@code null})
-	 * @since 4.3.3
-	 * @see #setContentDisposition(ContentDisposition)
-	 * @see #getContentDisposition()
-	 * @see <a href="https://tools.ietf.org/html/rfc7230#section-3.2.4">RFC 7230 Section 3.2.4</a>
-	 */
-	public void setContentDispositionFormData(String name, String filename, Charset charset) {
+	public void setContentDispositionFormData(String name, @Nullable String filename) {
 		Assert.notNull(name, "'name' must not be null");
-		ContentDisposition disposition = ContentDisposition.builder("form-data")
-				.name(name).filename(filename, charset).build();
-		setContentDisposition(disposition);
+		ContentDisposition.Builder disposition = ContentDisposition.builder("form-data").name(name);
+		if (filename != null) {
+			disposition.filename(filename);
+		}
+		setContentDisposition(disposition.build());
 	}
 
 	/**
-	 * Set the (new) value of the {@literal Content-Disposition} header. Supports the
-	 * disposition type and {@literal filename}, {@literal filename*} (encoded according
-	 * to RFC 5987, only the US-ASCII, UTF-8 and ISO-8859-1 charsets are supported),
-	 * {@literal name}, {@literal size} parameters.
+	 * Set the {@literal Content-Disposition} header.
+	 * <p>This could be used on a response to indicate if the content is
+	 * expected to be displayed inline in the browser or as an attachment to be
+	 * saved locally.
+	 * <p>It can also be used for a {@code "multipart/form-data"} request.
+	 * For more details see notes on {@link #setContentDispositionFormData}.
 	 * @since 5.0
 	 * @see #getContentDisposition()
 	 */
@@ -780,10 +847,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	}
 
 	/**
-	 * Return the {@literal Content-Disposition} header parsed as a {@link ContentDisposition}
-	 * instance. Supports the disposition type and {@literal filename}, {@literal filename*}
-	 * (encoded according to RFC 5987, only the US-ASCII, UTF-8 and ISO-8859-1 charsets are
-	 * supported), {@literal name}, {@literal size} parameters.
+	 * Return a parsed representation of the {@literal Content-Disposition} header.
 	 * @since 5.0
 	 * @see #setContentDisposition(ContentDisposition)
 	 */
@@ -802,9 +866,8 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * to set multiple content languages.</p>
 	 * @since 5.0
 	 */
-	public void setContentLanguage(Locale locale) {
-		Assert.notNull(locale, "'locale' must not be null");
-		set(CONTENT_LANGUAGE, locale.toLanguageTag());
+	public void setContentLanguage(@Nullable Locale locale) {
+		set(CONTENT_LANGUAGE, (locale != null ? locale.toLanguageTag() : null));
 	}
 
 	/**
@@ -815,6 +878,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * to get multiple content languages.</p>
 	 * @since 5.0
 	 */
+	@Nullable
 	public Locale getContentLanguage() {
 		return getValuesAsList(CONTENT_LANGUAGE)
 				.stream()
@@ -845,10 +909,15 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * Set the {@linkplain MediaType media type} of the body,
 	 * as specified by the {@code Content-Type} header.
 	 */
-	public void setContentType(MediaType mediaType) {
-		Assert.isTrue(!mediaType.isWildcardType(), "'Content-Type' cannot contain wildcard type '*'");
-		Assert.isTrue(!mediaType.isWildcardSubtype(), "'Content-Type' cannot contain wildcard subtype '*'");
-		set(CONTENT_TYPE, mediaType.toString());
+	public void setContentType(@Nullable MediaType mediaType) {
+		if (mediaType != null) {
+			Assert.isTrue(!mediaType.isWildcardType(), "'Content-Type' cannot contain wildcard type '*'");
+			Assert.isTrue(!mediaType.isWildcardSubtype(), "'Content-Type' cannot contain wildcard subtype '*'");
+			set(CONTENT_TYPE, mediaType.toString());
+		}
+		else {
+			set(CONTENT_TYPE, null);
+		}
 	}
 
 	/**
@@ -856,6 +925,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * by the {@code Content-Type} header.
 	 * <p>Returns {@code null} when the content-type is unknown.
 	 */
+	@Nullable
 	public MediaType getContentType() {
 		String value = getFirst(CONTENT_TYPE);
 		return (StringUtils.hasLength(value) ? MediaType.parseMediaType(value) : null);
@@ -876,7 +946,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * by the {@code Date} header.
 	 * <p>The date is returned as the number of milliseconds since
 	 * January 1, 1970 GMT. Returns -1 when the date is unknown.
-	 * @throws IllegalArgumentException if the value can't be converted to a date
+	 * @throws IllegalArgumentException if the value cannot be converted to a date
 	 */
 	public long getDate() {
 		return getFirstDate(DATE);
@@ -885,20 +955,30 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	/**
 	 * Set the (new) entity tag of the body, as specified by the {@code ETag} header.
 	 */
-	public void setETag(String eTag) {
-		if (eTag != null) {
-			Assert.isTrue(eTag.startsWith("\"") || eTag.startsWith("W/"),
-					"Invalid eTag, does not start with W/ or \"");
-			Assert.isTrue(eTag.endsWith("\""), "Invalid eTag, does not end with \"");
+	public void setETag(@Nullable String etag) {
+		if (etag != null) {
+			Assert.isTrue(etag.startsWith("\"") || etag.startsWith("W/"),
+					"Invalid ETag: does not start with W/ or \"");
+			Assert.isTrue(etag.endsWith("\""), "Invalid ETag: does not end with \"");
 		}
-		set(ETAG, eTag);
+		set(ETAG, etag);
 	}
 
 	/**
 	 * Return the entity tag of the body, as specified by the {@code ETag} header.
 	 */
+	@Nullable
 	public String getETag() {
 		return getFirst(ETAG);
+	}
+
+	/**
+	 * Set the duration after which the message is no longer valid,
+	 * as specified by the {@code Expires} header.
+	 * @since 5.0.5
+	 */
+	public void setExpires(ZonedDateTime expires) {
+		setZonedDateTime(EXPIRES, expires);
 	}
 
 	/**
@@ -916,6 +996,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * as specified by the {@code Expires} header.
 	 * <p>The date is returned as the number of milliseconds since
 	 * January 1, 1970 GMT. Returns -1 when the date is unknown.
+	 * @see #getFirstZonedDateTime(String)
 	 */
 	public long getExpires() {
 		return getFirstDate(EXPIRES, false);
@@ -925,13 +1006,21 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * Set the (new) value of the {@code Host} header.
 	 * <p>If the given {@linkplain InetSocketAddress#getPort() port} is {@code 0},
 	 * the host header will only contain the
-	 * {@linkplain InetSocketAddress#getHostString() hostname}.
+	 * {@linkplain InetSocketAddress#getHostString() host name}.
 	 * @since 5.0
 	 */
-	public void setHost(InetSocketAddress host) {
-		String value = (host.getPort() != 0 ?
-				String.format("%s:%d", host.getHostString(), host.getPort()) : host.getHostString());
-		set(HOST, value);
+	public void setHost(@Nullable InetSocketAddress host) {
+		if (host != null) {
+			String value = host.getHostString();
+			int port = host.getPort();
+			if (port != 0) {
+				value = value + ":" + port;
+			}
+			set(HOST, value);
+		}
+		else {
+			set(HOST, null);
+		}
 	}
 
 	/**
@@ -940,28 +1029,31 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * {@linkplain InetSocketAddress#getPort() port} will be {@code 0}.
 	 * @since 5.0
 	 */
+	@Nullable
 	public InetSocketAddress getHost() {
 		String value = getFirst(HOST);
 		if (value == null) {
 			return null;
 		}
-		int idx = value.lastIndexOf(':');
-		String hostname = null;
+
+		String host = null;
 		int port = 0;
-		if (idx != -1 && idx < value.length() - 1) {
-			hostname = value.substring(0, idx);
-			String portString = value.substring(idx + 1);
+		int separator = (value.startsWith("[") ? value.indexOf(':', value.indexOf(']')) : value.lastIndexOf(':'));
+		if (separator != -1) {
+			host = value.substring(0, separator);
+			String portString = value.substring(separator + 1);
 			try {
 				port = Integer.parseInt(portString);
 			}
 			catch (NumberFormatException ex) {
-				// ignored
+				// ignore
 			}
 		}
-		if (hostname == null) {
-			hostname = value;
+
+		if (host == null) {
+			host = value;
 		}
-		return InetSocketAddress.createUnresolved(hostname, port);
+		return InetSocketAddress.createUnresolved(host, port);
 	}
 
 	/**
@@ -1001,6 +1093,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * Return the value of the {@code If-Modified-Since} header.
 	 * <p>The date is returned as the number of milliseconds since
 	 * January 1, 1970 GMT. Returns -1 when the date is unknown.
+	 * @see #getFirstZonedDateTime(String)
 	 */
 	public long getIfModifiedSince() {
 		return getFirstDate(IF_MODIFIED_SINCE, false);
@@ -1042,6 +1135,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * <p>The date is returned as the number of milliseconds since
 	 * January 1, 1970 GMT. Returns -1 when the date is unknown.
 	 * @since 4.3
+	 * @see #getFirstZonedDateTime(String)
 	 */
 	public long getIfUnmodifiedSince() {
 		return getFirstDate(IF_UNMODIFIED_SINCE, false);
@@ -1062,6 +1156,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * {@code Last-Modified} header.
 	 * <p>The date is returned as the number of milliseconds since
 	 * January 1, 1970 GMT. Returns -1 when the date is unknown.
+	 * @see #getFirstZonedDateTime(String)
 	 */
 	public long getLastModified() {
 		return getFirstDate(LAST_MODIFIED, false);
@@ -1071,8 +1166,8 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * Set the (new) location of a resource,
 	 * as specified by the {@code Location} header.
 	 */
-	public void setLocation(URI location) {
-		set(LOCATION, location.toASCIIString());
+	public void setLocation(@Nullable URI location) {
+		set(LOCATION, (location != null ? location.toASCIIString() : null));
 	}
 
 	/**
@@ -1080,6 +1175,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * as specified by the {@code Location} header.
 	 * <p>Returns {@code null} when the location is unknown.
 	 */
+	@Nullable
 	public URI getLocation() {
 		String value = getFirst(LOCATION);
 		return (value != null ? URI.create(value) : null);
@@ -1088,13 +1184,14 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	/**
 	 * Set the (new) value of the {@code Origin} header.
 	 */
-	public void setOrigin(String origin) {
+	public void setOrigin(@Nullable String origin) {
 		set(ORIGIN, origin);
 	}
 
 	/**
 	 * Return the value of the {@code Origin} header.
 	 */
+	@Nullable
 	public String getOrigin() {
 		return getFirst(ORIGIN);
 	}
@@ -1102,13 +1199,14 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	/**
 	 * Set the (new) value of the {@code Pragma} header.
 	 */
-	public void setPragma(String pragma) {
+	public void setPragma(@Nullable String pragma) {
 		set(PRAGMA, pragma);
 	}
 
 	/**
 	 * Return the value of the {@code Pragma} header.
 	 */
+	@Nullable
 	public String getPragma() {
 		return getFirst(PRAGMA);
 	}
@@ -1133,13 +1231,14 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	/**
 	 * Set the (new) value of the {@code Upgrade} header.
 	 */
-	public void setUpgrade(String upgrade) {
+	public void setUpgrade(@Nullable String upgrade) {
 		set(UPGRADE, upgrade);
 	}
 
 	/**
 	 * Return the value of the {@code Upgrade} header.
 	 */
+	@Nullable
 	public String getUpgrade() {
 		return getFirst(UPGRADE);
 	}
@@ -1165,14 +1264,30 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 
 	/**
 	 * Set the given date under the given header name after formatting it as a string
-	 * using the pattern {@code "EEE, dd MMM yyyy HH:mm:ss zzz"}. The equivalent of
+	 * using the RFC-1123 date-time formatter. The equivalent of
+	 * {@link #set(String, String)} but for date headers.
+	 * @since 5.0
+	 */
+	public void setZonedDateTime(String headerName, ZonedDateTime date) {
+		set(headerName, DATE_FORMATTERS[0].format(date));
+	}
+
+	/**
+	 * Set the given date under the given header name after formatting it as a string
+	 * using the RFC-1123 date-time formatter. The equivalent of
 	 * {@link #set(String, String)} but for date headers.
 	 * @since 3.2.4
+	 * @see #setZonedDateTime(String, ZonedDateTime)
 	 */
 	public void setDate(String headerName, long date) {
-		SimpleDateFormat dateFormat = new SimpleDateFormat(DATE_FORMATS[0], Locale.US);
-		dateFormat.setTimeZone(GMT);
-		set(headerName, dateFormat.format(new Date(date)));
+		set(headerName, formatDate(date));
+	}
+
+	// Package private: also used in ResponseCookie..
+	static String formatDate(long date) {
+		Instant instant = Instant.ofEpochMilli(date);
+		ZonedDateTime time = ZonedDateTime.ofInstant(instant, GMT);
+		return DATE_FORMATTERS[0].format(time);
 	}
 
 	/**
@@ -1182,6 +1297,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * @param headerName the header name
 	 * @return the parsed date header, or -1 if none
 	 * @since 3.2.4
+	 * @see #getFirstZonedDateTime(String)
 	 */
 	public long getFirstDate(String headerName) {
 		return getFirstDate(headerName, true);
@@ -1197,32 +1313,69 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * {@link IllegalArgumentException} ({@code true}) or rather return -1
 	 * in that case ({@code false})
 	 * @return the parsed date header, or -1 if none (or invalid)
- 	 */
+	 * @see #getFirstZonedDateTime(String, boolean)
+	 */
 	private long getFirstDate(String headerName, boolean rejectInvalid) {
+		ZonedDateTime zonedDateTime = getFirstZonedDateTime(headerName, rejectInvalid);
+		return (zonedDateTime != null ? zonedDateTime.toInstant().toEpochMilli() : -1);
+	}
+
+	/**
+	 * Parse the first header value for the given header name as a date,
+	 * return {@code null} if there is no value, or raise {@link IllegalArgumentException}
+	 * if the value cannot be parsed as a date.
+	 * @param headerName the header name
+	 * @return the parsed date header, or {@code null} if none
+	 * @since 5.0
+	 */
+	@Nullable
+	public ZonedDateTime getFirstZonedDateTime(String headerName) {
+		return getFirstZonedDateTime(headerName, true);
+	}
+
+	/**
+	 * Parse the first header value for the given header name as a date,
+	 * return {@code null} if there is no value or also in case of an invalid value
+	 * (if {@code rejectInvalid=false}), or raise {@link IllegalArgumentException}
+	 * if the value cannot be parsed as a date.
+	 * @param headerName the header name
+	 * @param rejectInvalid whether to reject invalid values with an
+	 * {@link IllegalArgumentException} ({@code true}) or rather return {@code null}
+	 * in that case ({@code false})
+	 * @return the parsed date header, or {@code null} if none (or invalid)
+	 */
+	@Nullable
+	private ZonedDateTime getFirstZonedDateTime(String headerName, boolean rejectInvalid) {
 		String headerValue = getFirst(headerName);
 		if (headerValue == null) {
 			// No header value sent at all
-			return -1;
+			return null;
 		}
 		if (headerValue.length() >= 3) {
 			// Short "0" or "-1" like values are never valid HTTP date headers...
-			// Let's only bother with SimpleDateFormat parsing for long enough values.
-			for (String dateFormat : DATE_FORMATS) {
-				SimpleDateFormat simpleDateFormat = new SimpleDateFormat(dateFormat, Locale.US);
-				simpleDateFormat.setTimeZone(GMT);
+			// Let's only bother with DateTimeFormatter parsing for long enough values.
+
+			// See https://stackoverflow.com/questions/12626699/if-modified-since-http-header-passed-by-ie9-includes-length
+			int parametersIndex = headerValue.indexOf(';');
+			if (parametersIndex != -1) {
+				headerValue = headerValue.substring(0, parametersIndex);
+			}
+
+			for (DateTimeFormatter dateFormatter : DATE_FORMATTERS) {
 				try {
-					return simpleDateFormat.parse(headerValue).getTime();
+					return ZonedDateTime.parse(headerValue, dateFormatter);
 				}
-				catch (ParseException ex) {
+				catch (DateTimeParseException ex) {
 					// ignore
 				}
 			}
+
 		}
 		if (rejectInvalid) {
 			throw new IllegalArgumentException("Cannot parse date value \"" + headerValue +
 					"\" for \"" + headerName + "\" header");
 		}
-		return -1;
+		return null;
 	}
 
 	/**
@@ -1287,6 +1440,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * @return the combined result
 	 * @since 4.3
 	 */
+	@Nullable
 	protected String getFieldValues(String headerName) {
 		List<String> headerValues = get(headerName);
 		return (headerValues != null ? toCommaDelimitedString(headerValues) : null);
@@ -1318,6 +1472,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * @return the first header value, or {@code null} if none
 	 */
 	@Override
+	@Nullable
 	public String getFirst(String headerName) {
 		List<String> headerValues = this.headers.get(headerName);
 		return (headerValues != null ? headerValues.get(0) : null);
@@ -1332,15 +1487,20 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * @see #set(String, String)
 	 */
 	@Override
-	public void add(String headerName, String headerValue) {
+	public void add(String headerName, @Nullable String headerValue) {
 		List<String> headerValues = this.headers.computeIfAbsent(headerName, k -> new LinkedList<>());
 		headerValues.add(headerValue);
 	}
 
 	@Override
-	public void addAll(String key, List<String> values) {
+	public void addAll(String key, List<? extends String> values) {
 		List<String> currentValues = this.headers.computeIfAbsent(key, k -> new LinkedList<>());
 		currentValues.addAll(values);
+	}
+
+	@Override
+	public void addAll(MultiValueMap<String, String> values) {
+		values.forEach(this::addAll);
 	}
 
 	/**
@@ -1352,7 +1512,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * @see #add(String, String)
 	 */
 	@Override
-	public void set(String headerName, String headerValue) {
+	public void set(String headerName, @Nullable String headerValue) {
 		List<String> headerValues = new LinkedList<>();
 		headerValues.add(headerValue);
 		this.headers.put(headerName, headerValues);
@@ -1360,17 +1520,13 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 
 	@Override
 	public void setAll(Map<String, String> values) {
-		for (Entry<String, String> entry : values.entrySet()) {
-			set(entry.getKey(), entry.getValue());
-		}
+		values.forEach(this::set);
 	}
 
 	@Override
 	public Map<String, String> toSingleValueMap() {
 		LinkedHashMap<String, String> singleValueMap = new LinkedHashMap<>(this.headers.size());
-		for (Entry<String, List<String>> entry : this.headers.entrySet()) {
-			singleValueMap.put(entry.getKey(), entry.getValue().get(0));
-		}
+		this.headers.forEach((key, valueList) -> singleValueMap.put(key, valueList.get(0)));
 		return singleValueMap;
 	}
 
@@ -1398,6 +1554,7 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	}
 
 	@Override
+	@Nullable
 	public List<String> get(Object key) {
 		return this.headers.get(key);
 	}
@@ -1465,7 +1622,8 @@ public class HttpHeaders implements MultiValueMap<String, String>, Serializable 
 	 * Return a {@code HttpHeaders} object that can only be read, not written to.
 	 */
 	public static HttpHeaders readOnlyHttpHeaders(HttpHeaders headers) {
-		return new HttpHeaders(headers, true);
+		Assert.notNull(headers, "HttpHeaders must not be null");
+		return (headers.readOnly ? headers : new HttpHeaders(headers, true));
 	}
 
 }

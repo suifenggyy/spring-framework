@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,10 +19,9 @@ package org.springframework.http.client;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URI;
-import java.util.List;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.Cache;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
@@ -30,6 +29,7 @@ import okhttp3.RequestBody;
 import org.springframework.beans.factory.DisposableBean;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
+import org.springframework.lang.Nullable;
 import org.springframework.util.Assert;
 import org.springframework.util.StringUtils;
 
@@ -42,6 +42,7 @@ import org.springframework.util.StringUtils;
  * @author Roy Clarkson
  * @since 4.3
  */
+@SuppressWarnings("deprecation")
 public class OkHttp3ClientHttpRequestFactory
 		implements ClientHttpRequestFactory, AsyncClientHttpRequestFactory, DisposableBean {
 
@@ -118,8 +119,9 @@ public class OkHttp3ClientHttpRequestFactory
 	public void destroy() throws IOException {
 		if (this.defaultClient) {
 			// Clean up the client if we created it in the constructor
-			if (this.client.cache() != null) {
-				this.client.cache().close();
+			Cache cache = this.client.cache();
+			if (cache != null) {
+				cache.close();
 			}
 			this.client.dispatcher().executorService().shutdown();
 		}
@@ -135,15 +137,15 @@ public class OkHttp3ClientHttpRequestFactory
 				RequestBody.create(contentType, content) : null);
 
 		Request.Builder builder = new Request.Builder().url(uri.toURL()).method(method.name(), body);
-		for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
-			String headerName = entry.getKey();
-			for (String headerValue : entry.getValue()) {
+		headers.forEach((headerName, headerValues) -> {
+			for (String headerValue : headerValues) {
 				builder.addHeader(headerName, headerValue);
 			}
-		}
+		});
 		return builder.build();
 	}
 
+	@Nullable
 	private static okhttp3.MediaType getContentType(HttpHeaders headers) {
 		String rawContentType = headers.getFirst(HttpHeaders.CONTENT_TYPE);
 		return (StringUtils.hasText(rawContentType) ? okhttp3.MediaType.parse(rawContentType) : null);

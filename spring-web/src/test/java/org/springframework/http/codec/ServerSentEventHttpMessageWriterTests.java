@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2016 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,11 +16,15 @@
 
 package org.springframework.http.codec;
 
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.Collections;
+import java.util.Map;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.Test;
+import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
@@ -32,51 +36,49 @@ import org.springframework.http.codec.json.Jackson2JsonEncoder;
 import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpResponse;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.*;
+import static org.springframework.core.ResolvableType.*;
 
 /**
+ * Unit tests for {@link ServerSentEventHttpMessageWriter}.
  * @author Sebastien Deleuze
+ * @author Rossen Stoyanchev
  */
 public class ServerSentEventHttpMessageWriterTests extends AbstractDataBufferAllocatingTestCase {
 
-	private ServerSentEventHttpMessageWriter messageWriter = new ServerSentEventHttpMessageWriter(
-			Collections.singletonList(new Jackson2JsonEncoder()));
+	private static final Map<String, Object> HINTS = Collections.emptyMap();
+
+
+	private ServerSentEventHttpMessageWriter messageWriter =
+			new ServerSentEventHttpMessageWriter(new Jackson2JsonEncoder());
+
 
 	@Test
-	public void cantRead() {
-		assertFalse(messageWriter.canWrite(ResolvableType.forClass(Object.class),
-				new MediaType("foo", "bar")));
-	}
+	public void canWrite() {
 
-	@Test
-	public void canRead() {
-		assertTrue(messageWriter.canWrite(ResolvableType.forClass(Object.class), null));
-		assertTrue(messageWriter.canWrite(ResolvableType.forClass(Object.class),
-				new MediaType("text", "event-stream")));
-		assertTrue(messageWriter.canWrite(ResolvableType.forClass(ServerSentEvent.class),
-				new MediaType("bar", "bar")));
+		assertTrue(this.messageWriter.canWrite(forClass(Object.class), null));
+		assertFalse(this.messageWriter.canWrite(forClass(Object.class), new MediaType("foo", "bar")));
+
+		assertTrue(this.messageWriter.canWrite(null, MediaType.TEXT_EVENT_STREAM));
+		assertTrue(this.messageWriter.canWrite(forClass(ServerSentEvent.class), new MediaType("foo", "bar")));
+
+		// SPR-15464
+		assertTrue(this.messageWriter.canWrite(ResolvableType.NONE, MediaType.TEXT_EVENT_STREAM));
+		assertFalse(this.messageWriter.canWrite(ResolvableType.NONE, new MediaType("foo", "bar")));
 	}
 
 	@Test
 	public void writeServerSentEvent() {
-		ServerSentEvent<String> event = ServerSentEvent.<String>builder().
-				data("bar").id("c42").event("foo").comment("bla\nbla bla\nbla bla bla")
-				.retry(Duration.ofMillis(123L)).build();
 
-		Mono<ServerSentEvent<String>> source = Mono.just(event);
+		ServerSentEvent<?> event = ServerSentEvent.builder().data("bar").id("c42").event("foo")
+				.comment("bla\nbla bla\nbla bla bla").retry(Duration.ofMillis(123L)).build();
+
+		Mono<ServerSentEvent> source = Mono.just(event);
 		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
-		messageWriter.write(source, ResolvableType.forClass(ServerSentEvent.class),
-				new MediaType("text", "event-stream"), outputMessage, Collections.emptyMap()).blockMillis(5000);
+		testWrite(source, outputMessage, ServerSentEvent.class);
 
 		StepVerifier.create(outputMessage.getBodyAsString())
-				.expectNext("id:c42\n" +
-						"event:foo\n" +
-						"retry:123\n" +
-						":bla\n" +
-						":bla bla\n" +
-						":bla bla bla\n" +
-						"data:bar\n\n")
+				.expectNext("id:c42\nevent:foo\nretry:123\n:bla\n:bla bla\n:bla bla bla\ndata:bar\n\n")
 				.expectComplete()
 				.verify();
 	}
@@ -85,8 +87,7 @@ public class ServerSentEventHttpMessageWriterTests extends AbstractDataBufferAll
 	public void writeString() {
 		Flux<String> source = Flux.just("foo", "bar");
 		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
-		messageWriter.write(source, ResolvableType.forClass(String.class),
-				new MediaType("text", "event-stream"), outputMessage, Collections.emptyMap()).blockMillis(5000);
+		testWrite(source, outputMessage, String.class);
 
 		StepVerifier.create(outputMessage.getBodyAsString())
 				.expectNext("data:foo\n\ndata:bar\n\n")
@@ -98,25 +99,31 @@ public class ServerSentEventHttpMessageWriterTests extends AbstractDataBufferAll
 	public void writeMultiLineString() {
 		Flux<String> source = Flux.just("foo\nbar", "foo\nbaz");
 		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
-		messageWriter.write(source, ResolvableType.forClass(String.class),
-				new MediaType("text", "event-stream"), outputMessage, Collections.emptyMap()).blockMillis(5000);
+		testWrite(source, outputMessage, String.class);
 
 		StepVerifier.create(outputMessage.getBodyAsString())
-				.expectNext("data:foo\n" +
-						"data:bar\n\n" +
-						"data:foo\n" +
-						"data:baz\n\n")
+				.expectNext("data:foo\ndata:bar\n\ndata:foo\ndata:baz\n\n")
 				.expectComplete()
 				.verify();
 	}
 
+	@Test // SPR-16516
+	public void writeStringWithCustomCharset() {
+		Flux<String> source = Flux.just("\u00A3");
+		Charset charset = StandardCharsets.ISO_8859_1;
+		MediaType mediaType = new MediaType("text", "event-stream", charset);
+		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
+		testWrite(source, mediaType, outputMessage, String.class);
+
+		assertEquals(mediaType, outputMessage.getHeaders().getContentType());
+		StepVerifier.create(outputMessage.getBodyAsString()).expectNext("data:\u00A3\n\n").verifyComplete();
+	}
+
 	@Test
 	public void writePojo() {
-		Flux<Pojo> source = Flux.just(new Pojo("foofoo", "barbar"),
-				new Pojo("foofoofoo", "barbarbar"));
+		Flux<Pojo> source = Flux.just(new Pojo("foofoo", "barbar"), new Pojo("foofoofoo", "barbarbar"));
 		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
-		messageWriter.write(source, ResolvableType.forClass(Pojo.class),
-				MediaType.TEXT_EVENT_STREAM, outputMessage, Collections.emptyMap()).blockMillis(5000);
+		testWrite(source, outputMessage, Pojo.class);
 
 		StepVerifier.create(outputMessage.getBodyAsString())
 				.expectNext("data:{\"foo\":\"foofoo\",\"bar\":\"barbar\"}\n\n" +
@@ -127,15 +134,13 @@ public class ServerSentEventHttpMessageWriterTests extends AbstractDataBufferAll
 
 	@Test  // SPR-14899
 	public void writePojoWithPrettyPrint() {
-		ObjectMapper mapper = Jackson2ObjectMapperBuilder.json().indentOutput(true).build();
-		this.messageWriter = new ServerSentEventHttpMessageWriter(
-				Collections.singletonList(new Jackson2JsonEncoder(mapper)));
 
-		Flux<Pojo> source = Flux.just(new Pojo("foofoo", "barbar"),
-				new Pojo("foofoofoo", "barbarbar"));
+		ObjectMapper mapper = Jackson2ObjectMapperBuilder.json().indentOutput(true).build();
+		this.messageWriter = new ServerSentEventHttpMessageWriter(new Jackson2JsonEncoder(mapper));
+
+		Flux<Pojo> source = Flux.just(new Pojo("foofoo", "barbar"), new Pojo("foofoofoo", "barbarbar"));
 		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
-		messageWriter.write(source, ResolvableType.forClass(Pojo.class),
-				MediaType.TEXT_EVENT_STREAM, outputMessage, Collections.emptyMap()).blockMillis(5000);
+		testWrite(source, outputMessage, Pojo.class);
 
 		StepVerifier.create(outputMessage.getBodyAsString())
 				.expectNext("data:{\n" +
@@ -146,6 +151,32 @@ public class ServerSentEventHttpMessageWriterTests extends AbstractDataBufferAll
 						"data:  \"bar\" : \"barbarbar\"\n" + "data:}\n\n")
 				.expectComplete()
 				.verify();
+	}
+
+	@Test // SPR-16516, SPR-16539
+	public void writePojoWithCustomEncoding() {
+		Flux<Pojo> source = Flux.just(new Pojo("foo\uD834\uDD1E", "bar\uD834\uDD1E"));
+		Charset charset = StandardCharsets.UTF_16LE;
+		MediaType mediaType = new MediaType("text", "event-stream", charset);
+		MockServerHttpResponse outputMessage = new MockServerHttpResponse();
+		testWrite(source, mediaType, outputMessage, Pojo.class);
+
+		assertEquals(mediaType, outputMessage.getHeaders().getContentType());
+		StepVerifier.create(outputMessage.getBodyAsString())
+				.expectNext("data:{\"foo\":\"foo\uD834\uDD1E\",\"bar\":\"bar\uD834\uDD1E\"}\n\n")
+				.verifyComplete();
+	}
+
+
+	private <T> void testWrite(Publisher<T> source, MockServerHttpResponse response, Class<T> clazz) {
+		testWrite(source, MediaType.TEXT_EVENT_STREAM, response, clazz);
+	}
+
+	private <T> void testWrite(Publisher<T> source, MediaType mediaType, MockServerHttpResponse response,
+			Class<T> clazz) {
+
+		this.messageWriter.write(source, forClass(clazz), mediaType, response, HINTS)
+				.block(Duration.ofMillis(5000));
 	}
 
 }

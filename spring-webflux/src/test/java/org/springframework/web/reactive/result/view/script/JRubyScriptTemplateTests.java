@@ -19,21 +19,16 @@ package org.springframework.web.reactive.result.view.script;
 import java.util.HashMap;
 import java.util.Map;
 
-import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
 
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.support.StaticApplicationContext;
 import org.springframework.http.MediaType;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpRequest;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpResponse;
-import org.springframework.web.server.ServerWebExchange;
-import org.springframework.web.server.adapter.DefaultServerWebExchange;
-import org.springframework.web.server.session.DefaultWebSessionManager;
-import org.springframework.web.server.session.WebSessionManager;
+import org.springframework.mock.web.test.server.MockServerWebExchange;
 
 import static org.junit.Assert.assertEquals;
 
@@ -45,31 +40,22 @@ import static org.junit.Assert.assertEquals;
 @Ignore("JRuby not compatible with JDK 9 yet")
 public class JRubyScriptTemplateTests {
 
-	private StaticApplicationContext context;
-
-	@Before
-	public void setup() {
-		this.context = new StaticApplicationContext();
-	}
-
 	@Test
 	public void renderTemplate() throws Exception {
 		Map<String, Object> model = new HashMap<>();
 		model.put("title", "Layout example");
 		model.put("body", "This is the body");
-		MockServerHttpResponse response = renderViewWithModel("org/springframework/web/reactive/result/view/script/jruby/template.erb", model);
+		String url = "org/springframework/web/reactive/result/view/script/jruby/template.erb";
+		MockServerHttpResponse response = renderViewWithModel(url, model);
 		assertEquals("<html><head><title>Layout example</title></head><body><p>This is the body</p></body></html>",
 				response.getBodyAsString().block());
 	}
 
 	private MockServerHttpResponse renderViewWithModel(String viewUrl, Map<String, Object> model) throws Exception {
 		ScriptTemplateView view = createViewWithUrl(viewUrl);
-		MockServerHttpRequest request = MockServerHttpRequest.get("/").build();
-		MockServerHttpResponse response = new MockServerHttpResponse();
-		WebSessionManager manager = new DefaultWebSessionManager();
-		ServerWebExchange exchange = new DefaultServerWebExchange(request, response, manager);
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		view.renderInternal(model, MediaType.TEXT_HTML, exchange).block();
-		return response;
+		return exchange.getResponse();
 	}
 
 	private ScriptTemplateView createViewWithUrl(String viewUrl) throws Exception {

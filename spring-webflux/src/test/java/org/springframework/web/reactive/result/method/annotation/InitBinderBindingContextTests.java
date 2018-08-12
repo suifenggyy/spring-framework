@@ -21,14 +21,14 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-import org.junit.Before;
 import org.junit.Test;
 
 import org.springframework.core.LocalVariableTableParameterNameDiscoverer;
+import org.springframework.core.ReactiveAdapterRegistry;
 import org.springframework.core.convert.ConversionService;
 import org.springframework.format.support.DefaultFormattingConversionService;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpRequest;
-import org.springframework.mock.http.server.reactive.test.MockServerHttpResponse;
+import org.springframework.mock.web.test.server.MockServerWebExchange;
 import org.springframework.web.bind.WebDataBinder;
 import org.springframework.web.bind.annotation.InitBinder;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -36,9 +36,11 @@ import org.springframework.web.bind.support.ConfigurableWebBindingInitializer;
 import org.springframework.web.reactive.BindingContext;
 import org.springframework.web.reactive.result.method.SyncHandlerMethodArgumentResolver;
 import org.springframework.web.reactive.result.method.SyncInvocableHandlerMethod;
-import org.springframework.web.server.adapter.DefaultServerWebExchange;
 
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 
 /**
  * Unit tests for {@link InitBinderBindingContext}.
@@ -50,18 +52,12 @@ public class InitBinderBindingContextTests {
 
 	private final List<SyncHandlerMethodArgumentResolver> argumentResolvers = new ArrayList<>();
 
-	private MockServerHttpRequest request;
-
-
-	@Before
-	public void setup() throws Exception {
-		this.request = MockServerHttpRequest.get("/").build();
-	}
 
 	@Test
 	public void createBinder() throws Exception {
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		BindingContext context = createBindingContext("initBinder", WebDataBinder.class);
-		WebDataBinder dataBinder = context.createDataBinder(createExchange(), null, null);
+		WebDataBinder dataBinder = context.createDataBinder(exchange, null, null);
 
 		assertNotNull(dataBinder.getDisallowedFields());
 		assertEquals("id", dataBinder.getDisallowedFields()[0]);
@@ -72,16 +68,18 @@ public class InitBinderBindingContextTests {
 		ConversionService conversionService = new DefaultFormattingConversionService();
 		bindingInitializer.setConversionService(conversionService);
 
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		BindingContext context = createBindingContext("initBinder", WebDataBinder.class);
-		WebDataBinder dataBinder = context.createDataBinder(createExchange(), null, null);
+		WebDataBinder dataBinder = context.createDataBinder(exchange, null, null);
 
 		assertSame(conversionService, dataBinder.getConversionService());
 	}
 
 	@Test
 	public void createBinderWithAttrName() throws Exception {
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		BindingContext context = createBindingContext("initBinderWithAttributeName", WebDataBinder.class);
-		WebDataBinder dataBinder = context.createDataBinder(createExchange(), null, "foo");
+		WebDataBinder dataBinder = context.createDataBinder(exchange, null, "foo");
 
 		assertNotNull(dataBinder.getDisallowedFields());
 		assertEquals("id", dataBinder.getDisallowedFields()[0]);
@@ -89,42 +87,43 @@ public class InitBinderBindingContextTests {
 
 	@Test
 	public void createBinderWithAttrNameNoMatch() throws Exception {
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		BindingContext context = createBindingContext("initBinderWithAttributeName", WebDataBinder.class);
-		WebDataBinder dataBinder = context.createDataBinder(createExchange(), null, "invalidName");
+		WebDataBinder dataBinder = context.createDataBinder(exchange, null, "invalidName");
 
 		assertNull(dataBinder.getDisallowedFields());
 	}
 
 	@Test
 	public void createBinderNullAttrName() throws Exception {
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		BindingContext context = createBindingContext("initBinderWithAttributeName", WebDataBinder.class);
-		WebDataBinder dataBinder = context.createDataBinder(createExchange(), null, null);
+		WebDataBinder dataBinder = context.createDataBinder(exchange, null, null);
 
 		assertNull(dataBinder.getDisallowedFields());
 	}
 
 	@Test(expected = IllegalStateException.class)
 	public void returnValueNotExpected() throws Exception {
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		BindingContext context = createBindingContext("initBinderReturnValue", WebDataBinder.class);
-		context.createDataBinder(createExchange(), null, "invalidName");
+		context.createDataBinder(exchange, null, "invalidName");
 	}
 
 	@Test
 	public void createBinderTypeConversion() throws Exception {
-		this.request = MockServerHttpRequest.get("/path?requestParam=22").build();
-		this.argumentResolvers.add(new RequestParamMethodArgumentResolver(null, false));
+		MockServerHttpRequest request = MockServerHttpRequest.get("/path?requestParam=22").build();
+		MockServerWebExchange exchange = MockServerWebExchange.from(request);
+		ReactiveAdapterRegistry adapterRegistry = ReactiveAdapterRegistry.getSharedInstance();
+		this.argumentResolvers.add(new RequestParamMethodArgumentResolver(null, adapterRegistry, false));
 
 		BindingContext context = createBindingContext("initBinderTypeConversion", WebDataBinder.class, int.class);
-		WebDataBinder dataBinder = context.createDataBinder(createExchange(), null, "foo");
+		WebDataBinder dataBinder = context.createDataBinder(exchange, null, "foo");
 
 		assertNotNull(dataBinder.getDisallowedFields());
 		assertEquals("requestParam-22", dataBinder.getDisallowedFields()[0]);
 	}
 
-
-	private DefaultServerWebExchange createExchange() {
-		return new DefaultServerWebExchange(this.request, new MockServerHttpResponse());
-	}
 
 	private BindingContext createBindingContext(String methodName, Class<?>... parameterTypes) throws Exception {
 		Object handler = new InitBinderHandler();

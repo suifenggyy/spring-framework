@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2015 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,63 +19,52 @@ package org.springframework.web.reactive.result.view.script;
 import java.util.HashMap;
 import java.util.Map;
 
-import static org.junit.Assert.assertEquals;
-import org.junit.Before;
 import org.junit.Test;
 
 import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.support.StaticApplicationContext;
 import org.springframework.http.MediaType;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpRequest;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpResponse;
-import org.springframework.web.server.ServerWebExchange;
-import org.springframework.web.server.adapter.DefaultServerWebExchange;
-import org.springframework.web.server.session.DefaultWebSessionManager;
-import org.springframework.web.server.session.WebSessionManager;
+import org.springframework.mock.web.test.server.MockServerWebExchange;
+
+import static org.junit.Assert.assertEquals;
 
 /**
- * Unit tests for pure Javascript templates running on Nashorn engine.
+ * Unit tests for pure JavaScript templates running on Nashorn engine.
  *
  * @author Sebastien Deleuze
  */
 public class NashornScriptTemplateTests {
-
-	private StaticApplicationContext context;
-
-	@Before
-	public void setup() {
-		this.context = new StaticApplicationContext();
-	}
 
 	@Test
 	public void renderTemplate() throws Exception {
 		Map<String, Object> model = new HashMap<>();
 		model.put("title", "Layout example");
 		model.put("body", "This is the body");
-		MockServerHttpResponse response = renderViewWithModel("org/springframework/web/reactive/result/view/script/nashorn/template.html",
-				model, ScriptTemplatingConfiguration.class);
+		String url = "org/springframework/web/reactive/result/view/script/nashorn/template.html";
+		MockServerHttpResponse response = render(url, model, ScriptTemplatingConfiguration.class);
 		assertEquals("<html><head><title>Layout example</title></head><body><p>This is the body</p></body></html>",
 				response.getBodyAsString().block());
 	}
 
 	@Test  // SPR-13453
 	public void renderTemplateWithUrl() throws Exception {
-		MockServerHttpResponse response = renderViewWithModel("org/springframework/web/reactive/result/view/script/nashorn/template.html",
-				null, ScriptTemplatingWithUrlConfiguration.class);
-		assertEquals("<html><head><title>Check url parameter</title></head><body><p>org/springframework/web/reactive/result/view/script/nashorn/template.html</p></body></html>",
+		String url = "org/springframework/web/reactive/result/view/script/nashorn/template.html";
+		Class<?> configClass = ScriptTemplatingWithUrlConfiguration.class;
+		MockServerHttpResponse response = render(url, null, configClass);
+		assertEquals("<html><head><title>Check url parameter</title></head><body><p>" + url + "</p></body></html>",
 				response.getBodyAsString().block());
 	}
 
-	private MockServerHttpResponse renderViewWithModel(String viewUrl, Map<String, Object> model, Class<?> configuration) throws Exception {
+	private MockServerHttpResponse render(String viewUrl, Map<String, Object> model,
+			Class<?> configuration) throws Exception {
+
 		ScriptTemplateView view = createViewWithUrl(viewUrl, configuration);
-		MockServerHttpRequest request = MockServerHttpRequest.get("/").build();
-		MockServerHttpResponse response = new MockServerHttpResponse();
-		WebSessionManager manager = new DefaultWebSessionManager();
-		ServerWebExchange exchange = new DefaultServerWebExchange(request, response, manager);
+		MockServerWebExchange exchange = MockServerWebExchange.from(MockServerHttpRequest.get("/"));
 		view.renderInternal(model, MediaType.TEXT_HTML, exchange).block();
-		return response;
+		return exchange.getResponse();
 	}
 
 	private ScriptTemplateView createViewWithUrl(String viewUrl, Class<?> configuration) throws Exception {

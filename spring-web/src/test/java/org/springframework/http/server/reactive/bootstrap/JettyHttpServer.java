@@ -41,6 +41,7 @@ public class JettyHttpServer extends AbstractHttpServer {
 
 		ServletHttpHandlerAdapter servlet = createServletAdapter();
 		ServletHolder servletHolder = new ServletHolder(servlet);
+		servletHolder.setAsyncSupported(true);
 
 		this.contextHandler = new ServletContextHandler(this.jettyServer, "", false, false);
 		this.contextHandler.addServlet(servletHolder, "/");
@@ -53,8 +54,7 @@ public class JettyHttpServer extends AbstractHttpServer {
 	}
 
 	private ServletHttpHandlerAdapter createServletAdapter() {
-		return getHttpHandlerMap() != null ? new JettyHttpHandlerAdapter(getHttpHandlerMap()) :
-				new JettyHttpHandlerAdapter(getHttpHandler());
+		return new JettyHttpHandlerAdapter(resolveHttpHandler());
 	}
 
 	@Override

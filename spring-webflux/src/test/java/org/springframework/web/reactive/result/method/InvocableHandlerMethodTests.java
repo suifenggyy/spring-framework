@@ -16,30 +16,37 @@
 
 package org.springframework.web.reactive.result.method;
 
-import java.util.Collections;
-import java.util.Optional;
+import java.io.UnsupportedEncodingException;
+import java.lang.reflect.Method;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Arrays;
 
-import org.junit.Before;
 import org.junit.Test;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.lang.Nullable;
 import org.springframework.mock.http.server.reactive.test.MockServerHttpRequest;
-import org.springframework.mock.http.server.reactive.test.MockServerHttpResponse;
+import org.springframework.mock.web.test.server.MockServerWebExchange;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.reactive.BindingContext;
 import org.springframework.web.reactive.HandlerResult;
-import org.springframework.web.reactive.result.ResolvableMethod;
 import org.springframework.web.server.ServerWebExchange;
 import org.springframework.web.server.UnsupportedMediaTypeStatusException;
-import org.springframework.web.server.adapter.DefaultServerWebExchange;
-import org.springframework.web.server.session.MockWebSessionManager;
 
-import static org.hamcrest.Matchers.*;
+import static org.hamcrest.Matchers.is;
 import static org.junit.Assert.*;
 import static org.mockito.Mockito.any;
-import static org.mockito.Mockito.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+import static org.springframework.mock.http.server.reactive.test.MockServerHttpRequest.get;
+import static org.springframework.web.method.ResolvableMethod.on;
 
 /**
  * Unit tests for {@link InvocableHandlerMethod}.
@@ -47,98 +54,153 @@ import static org.mockito.Mockito.*;
  * @author Rossen Stoyanchev
  * @author Juergen Hoeller
  */
-@SuppressWarnings("ThrowableResultOfMethodCallIgnored")
 public class InvocableHandlerMethodTests {
 
-	private ServerWebExchange exchange;
-
-
-	@Before
-	public void setup() throws Exception {
-		this.exchange = new DefaultServerWebExchange(
-				MockServerHttpRequest.get("http://localhost:8080/path").build(),
-				new MockServerHttpResponse(),
-				new MockWebSessionManager());
-	}
+	private final MockServerWebExchange exchange = MockServerWebExchange.from(get("http://localhost:8080/path"));
 
 
 	@Test
-	public void invokeMethodWithNoArguments() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("noArgs");
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+	public void invokeAndHandle_VoidWithResponseStatus() throws Exception {
+		Method method = on(VoidController.class).mockCall(VoidController::responseStatus).method();
+		HandlerResult result = invoke(new VoidController(), method).block(Duration.ZERO);
 
+		assertNull("Expected no result (i.e. fully handled)", result);
+		assertEquals(HttpStatus.BAD_REQUEST, this.exchange.getResponse().getStatusCode());
+	}
+
+	@Test
+	public void invokeAndHandle_withResponse() throws Exception {
+		ServerHttpResponse response = this.exchange.getResponse();
+		Method method = on(VoidController.class).mockCall(c -> c.response(response)).method();
+		HandlerResult result = invoke(new VoidController(), method, resolverFor(Mono.just(response)))
+				.block(Duration.ZERO);
+
+		assertNull("Expected no result (i.e. fully handled)", result);
+		assertEquals("bar", this.exchange.getResponse().getHeaders().getFirst("foo"));
+	}
+
+	@Test
+	public void invokeAndHandle_withResponseAndMonoVoid() throws Exception {
+		ServerHttpResponse response = this.exchange.getResponse();
+		Method method = on(VoidController.class).mockCall(c -> c.responseMonoVoid(response)).method();
+		HandlerResult result = invoke(new VoidController(), method, resolverFor(Mono.just(response)))
+				.block(Duration.ZERO);
+
+		assertNull("Expected no result (i.e. fully handled)", result);
+		assertEquals("body", this.exchange.getResponse().getBodyAsString().block(Duration.ZERO));
+	}
+
+	@Test
+	public void invokeAndHandle_withExchange() throws Exception {
+		Method method = on(VoidController.class).mockCall(c -> c.exchange(exchange)).method();
+		HandlerResult result = invoke(new VoidController(), method, resolverFor(Mono.just(this.exchange)))
+				.block(Duration.ZERO);
+
+		assertNull("Expected no result (i.e. fully handled)", result);
+		assertEquals("bar", this.exchange.getResponse().getHeaders().getFirst("foo"));
+	}
+
+	@Test
+	public void invokeAndHandle_withExchangeAndMonoVoid() throws Exception {
+		Method method = on(VoidController.class).mockCall(c -> c.exchangeMonoVoid(exchange)).method();
+		HandlerResult result = invoke(new VoidController(), method, resolverFor(Mono.just(this.exchange)))
+				.block(Duration.ZERO);
+
+		assertNull("Expected no result (i.e. fully handled)", result);
+		assertEquals("body", this.exchange.getResponse().getBodyAsString().block(Duration.ZERO));
+	}
+
+	@Test
+	public void invokeAndHandle_withNotModified() throws Exception {
+		ServerWebExchange exchange = MockServerWebExchange.from(
+				MockServerHttpRequest.get("/").ifModifiedSince(10 * 1000 * 1000));
+
+		Method method = on(VoidController.class).mockCall(c -> c.notModified(exchange)).method();
+		HandlerResult result = invoke(new VoidController(), method, resolverFor(Mono.just(exchange)))
+				.block(Duration.ZERO);
+
+		assertNull("Expected no result (i.e. fully handled)", result);
+	}
+
+	@Test
+	public void invokeMethodWithNoArguments() throws Exception {
+		Method method = on(TestController.class).mockCall(TestController::noArgs).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method);
 		assertHandlerResultValue(mono, "success");
 	}
 
 	@Test
 	public void invokeMethodWithNoValue() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("singleArg");
-		addResolver(hm, Mono.empty());
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+		Mono<Object> resolvedValue = Mono.empty();
+		Method method = on(TestController.class).mockCall(o -> o.singleArg(null)).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method, resolverFor(resolvedValue));
 
 		assertHandlerResultValue(mono, "success:null");
 	}
 
 	@Test
 	public void invokeMethodWithValue() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("singleArg");
-		addResolver(hm, Mono.just("value1"));
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+		Mono<Object> resolvedValue = Mono.just("value1");
+		Method method = on(TestController.class).mockCall(o -> o.singleArg(null)).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method, resolverFor(resolvedValue));
 
 		assertHandlerResultValue(mono, "success:value1");
 	}
 
 	@Test
 	public void noMatchingResolver() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("singleArg");
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+		Method method = on(TestController.class).mockCall(o -> o.singleArg(null)).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method);
 
 		try {
 			mono.block();
 			fail("Expected IllegalStateException");
 		}
 		catch (IllegalStateException ex) {
-			assertThat(ex.getMessage(), is("No suitable resolver for argument 0 of type 'java.lang.String' " +
-					"on " + hm.getMethod().toGenericString()));
+			assertThat(ex.getMessage(), is("Could not resolve parameter [0] in " +
+					method.toGenericString() + ": No suitable resolver"));
 		}
 	}
 
 	@Test
 	public void resolverThrowsException() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("singleArg");
-		addResolver(hm, Mono.error(new UnsupportedMediaTypeStatusException("boo")));
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+		Mono<Object> resolvedValue = Mono.error(new UnsupportedMediaTypeStatusException("boo"));
+		Method method = on(TestController.class).mockCall(o -> o.singleArg(null)).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method, resolverFor(resolvedValue));
 
 		try {
 			mono.block();
 			fail("Expected UnsupportedMediaTypeStatusException");
 		}
 		catch (UnsupportedMediaTypeStatusException ex) {
-			assertThat(ex.getMessage(), is("Request failure [status: 415, reason: \"boo\"]"));
+			assertThat(ex.getMessage(), is("415 UNSUPPORTED_MEDIA_TYPE \"boo\""));
 		}
 	}
 
 	@Test
-	public void illegalArgumentExceptionIsWrappedWithInvocationDetails() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("singleArg");
-		addResolver(hm, Mono.just(1));
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+	public void illegalArgumentException() throws Exception {
+		Mono<Object> resolvedValue = Mono.just(1);
+		Method method = on(TestController.class).mockCall(o -> o.singleArg(null)).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method, resolverFor(resolvedValue));
 
 		try {
 			mono.block();
 			fail("Expected IllegalStateException");
 		}
 		catch (IllegalStateException ex) {
-			assertThat(ex.getMessage(), is("Failed to invoke handler method with resolved arguments: " +
-					"[0][type=java.lang.Integer][value=1] " +
-					"on " + hm.getMethod().toGenericString()));
+			assertNotNull("Exception not wrapped", ex.getCause());
+			assertTrue(ex.getCause() instanceof IllegalArgumentException);
+			assertTrue(ex.getMessage().contains("Controller ["));
+			assertTrue(ex.getMessage().contains("Method ["));
+			assertTrue(ex.getMessage().contains("with argument values:"));
+			assertTrue(ex.getMessage().contains("[0] [type=java.lang.Integer] [value=1]"));
 		}
 	}
 
 	@Test
 	public void invocationTargetExceptionIsUnwrapped() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("exceptionMethod");
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+		Method method = on(TestController.class).mockCall(TestController::exceptionMethod).method();
+		Mono<HandlerResult> mono = invoke(new TestController(), method);
 
 		try {
 			mono.block();
@@ -151,32 +213,37 @@ public class InvocableHandlerMethodTests {
 
 	@Test
 	public void invokeMethodWithResponseStatus() throws Exception {
-		InvocableHandlerMethod hm = handlerMethod("responseStatus");
-		Mono<HandlerResult> mono = hm.invoke(this.exchange, new BindingContext());
+		Method method = on(TestController.class).annotPresent(ResponseStatus.class).resolveMethod();
+		Mono<HandlerResult> mono = invoke(new TestController(), method);
 
 		assertHandlerResultValue(mono, "created");
 		assertThat(this.exchange.getResponse().getStatusCode(), is(HttpStatus.CREATED));
 	}
 
 
-	private InvocableHandlerMethod handlerMethod(String name) throws Exception {
-		TestController controller = new TestController();
-		return ResolvableMethod.on(controller).name(name).resolveHandlerMethod();
+	private Mono<HandlerResult> invoke(Object handler, Method method) {
+		return invoke(handler, method, new HandlerMethodArgumentResolver[0]);
 	}
 
-	private void addResolver(InvocableHandlerMethod handlerMethod, Mono<Object> resolvedValue) {
+	private Mono<HandlerResult> invoke(Object handler, Method method,
+			HandlerMethodArgumentResolver... resolver) {
+
+		InvocableHandlerMethod hm = new InvocableHandlerMethod(handler, method);
+		hm.setArgumentResolvers(Arrays.asList(resolver));
+		return hm.invoke(this.exchange, new BindingContext());
+	}
+
+	private <T> HandlerMethodArgumentResolver resolverFor(Mono<Object> resolvedValue) {
 		HandlerMethodArgumentResolver resolver = mock(HandlerMethodArgumentResolver.class);
 		when(resolver.supportsParameter(any())).thenReturn(true);
 		when(resolver.resolveArgument(any(), any(), any())).thenReturn(resolvedValue);
-		handlerMethod.setArgumentResolvers(Collections.singletonList(resolver));
+		return resolver;
 	}
 
 	private void assertHandlerResultValue(Mono<HandlerResult> mono, String expected) {
 		StepVerifier.create(mono)
 				.consumeNextWith(result -> {
-					Optional<?> optional = result.getReturnValue();
-					assertTrue(optional.isPresent());
-					assertEquals(expected, optional.get());
+					assertEquals(expected, result.getReturnValue());
 				})
 				.expectComplete()
 				.verify();
@@ -201,6 +268,47 @@ public class InvocableHandlerMethodTests {
 		@ResponseStatus(HttpStatus.CREATED)
 		public String responseStatus() {
 			return "created";
+		}
+	}
+
+	@SuppressWarnings("unused")
+	private static class VoidController {
+
+		@ResponseStatus(HttpStatus.BAD_REQUEST)
+		public void responseStatus() {
+		}
+
+		public void response(ServerHttpResponse response) {
+			response.getHeaders().add("foo", "bar");
+		}
+
+		public Mono<Void> responseMonoVoid(ServerHttpResponse response) {
+			return response.writeWith(getBody("body"));
+		}
+
+		public void exchange(ServerWebExchange exchange) {
+			exchange.getResponse().getHeaders().add("foo", "bar");
+		}
+
+		public Mono<Void> exchangeMonoVoid(ServerWebExchange exchange) {
+			return exchange.getResponse().writeWith(getBody("body"));
+		}
+
+		@Nullable
+		public String notModified(ServerWebExchange exchange) {
+			if (exchange.checkNotModified(Instant.ofEpochMilli(1000 * 1000))) {
+				return null;
+			}
+			return "body";
+		}
+
+		private Flux<DataBuffer> getBody(String body) {
+			try {
+				return Flux.just(new DefaultDataBufferFactory().wrap(body.getBytes("UTF-8")));
+			}
+			catch (UnsupportedEncodingException ex) {
+				throw new IllegalStateException(ex);
+			}
 		}
 	}
 

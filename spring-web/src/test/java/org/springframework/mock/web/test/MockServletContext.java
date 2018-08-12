@@ -1,5 +1,5 @@
 /*
- * Copyright 2002-2017 the original author or authors.
+ * Copyright 2002-2018 the original author or authors.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -29,7 +29,6 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
-import javax.activation.FileTypeMap;
 import javax.servlet.Filter;
 import javax.servlet.FilterRegistration;
 import javax.servlet.RequestDispatcher;
@@ -47,9 +46,13 @@ import org.apache.commons.logging.LogFactory;
 import org.springframework.core.io.DefaultResourceLoader;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.ResourceLoader;
+import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
 import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
+import org.springframework.util.MimeType;
 import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
 import org.springframework.web.util.WebUtils;
 
 /**
@@ -82,7 +85,7 @@ import org.springframework.web.util.WebUtils;
  */
 public class MockServletContext implements ServletContext {
 
-	/** Default Servlet name used by Tomcat, Jetty, JBoss, and GlassFish: {@value} */
+	/** Default Servlet name used by Tomcat, Jetty, JBoss, and GlassFish: {@value}. */
 	private static final String COMMON_DEFAULT_SERVLET_NAME = "default";
 
 	private static final String TEMP_DIR_SYSTEM_PROPERTY = "java.io.tmpdir";
@@ -132,6 +135,12 @@ public class MockServletContext implements ServletContext {
 
 	private int sessionTimeout;
 
+	private String requestCharacterEncoding;
+
+	private String responseCharacterEncoding;
+
+	private final Map<String, MediaType> mimeTypes = new LinkedHashMap<>();
+
 
 	/**
 	 * Create a new {@code MockServletContext}, using no base path and a
@@ -171,7 +180,7 @@ public class MockServletContext implements ServletContext {
 	 */
 	public MockServletContext(String resourceBasePath, ResourceLoader resourceLoader) {
 		this.resourceLoader = (resourceLoader != null ? resourceLoader : new DefaultResourceLoader());
-		this.resourceBasePath = (resourceBasePath != null ? resourceBasePath : "");
+		this.resourceBasePath = resourceBasePath;
 
 		// Use JVM temp dir as ServletContext temp dir.
 		String tempDir = System.getProperty(TEMP_DIR_SYSTEM_PROPERTY);
@@ -196,7 +205,7 @@ public class MockServletContext implements ServletContext {
 	}
 
 	public void setContextPath(String contextPath) {
-		this.contextPath = (contextPath != null ? contextPath : "");
+		this.contextPath = contextPath;
 	}
 
 	@Override
@@ -252,29 +261,27 @@ public class MockServletContext implements ServletContext {
 		return this.effectiveMinorVersion;
 	}
 
-	/**
-	 * This method uses the default
-	 * {@link javax.activation.FileTypeMap#getDefaultFileTypeMap() FileTypeMap}
-	 * from the Java Activation Framework to resolve MIME types.
-	 * <p>The Java Activation Framework returns {@code "application/octet-stream"}
-	 * if the MIME type is unknown (i.e., it never returns {@code null}). Thus, in
-	 * order to honor the {@link ServletContext#getMimeType(String)} contract,
-	 * this method returns {@code null} if the MIME type is
-	 * {@code "application/octet-stream"}.
-	 * <p>{@code MockServletContext} does not provide a direct mechanism for
-	 * setting a custom MIME type; however, if the default {@code FileTypeMap}
-	 * is an instance of {@code javax.activation.MimetypesFileTypeMap}, a custom
-	 * MIME type named {@code text/enigma} can be registered for a custom
-	 * {@code .puzzle} file extension in the following manner:
-	 * <pre style="code">
-	 * MimetypesFileTypeMap mimetypesFileTypeMap = (MimetypesFileTypeMap) FileTypeMap.getDefaultFileTypeMap();
-	 * mimetypesFileTypeMap.addMimeTypes("text/enigma    puzzle");
-	 * </pre>
-	 */
 	@Override
 	public String getMimeType(String filePath) {
-		String mimeType = FileTypeMap.getDefaultFileTypeMap().getContentType(filePath);
-		return ("application/octet-stream".equals(mimeType) ? null : mimeType);
+		String extension = StringUtils.getFilenameExtension(filePath);
+		if (this.mimeTypes.containsKey(extension)) {
+			return this.mimeTypes.get(extension).toString();
+		}
+		else {
+			return MediaTypeFactory.getMediaType(filePath).
+					map(MimeType::toString)
+					.orElse(null);
+		}
+	}
+
+	/**
+	 * Adds a mime type mapping for use by {@link #getMimeType(String)}.
+	 * @param fileExtension a file extension, such as {@code txt}, {@code gif}
+	 * @param mimeType the mime type
+	 */
+	public void addMimeType(String fileExtension, MediaType mimeType) {
+		Assert.notNull(fileExtension, "'fileExtension' must not be null");
+		this.mimeTypes.put(fileExtension, mimeType);
 	}
 
 	@Override
@@ -298,7 +305,9 @@ public class MockServletContext implements ServletContext {
 			return resourcePaths;
 		}
 		catch (IOException ex) {
-			logger.warn("Couldn't get resource paths for " + resource, ex);
+			if (logger.isWarnEnabled()) {
+				logger.warn("Could not get resource paths for " + resource, ex);
+			}
 			return null;
 		}
 	}
@@ -316,7 +325,9 @@ public class MockServletContext implements ServletContext {
 			throw ex;
 		}
 		catch (IOException ex) {
-			logger.warn("Couldn't get URL for " + resource, ex);
+			if (logger.isWarnEnabled()) {
+				logger.warn("Could not get URL for " + resource, ex);
+			}
 			return null;
 		}
 	}
@@ -331,7 +342,9 @@ public class MockServletContext implements ServletContext {
 			return resource.getInputStream();
 		}
 		catch (IOException ex) {
-			logger.warn("Couldn't open InputStream for " + resource, ex);
+			if (logger.isWarnEnabled()) {
+				logger.warn("Could not open InputStream for " + resource, ex);
+			}
 			return null;
 		}
 	}
@@ -399,8 +412,8 @@ public class MockServletContext implements ServletContext {
 		registerNamedDispatcher(this.defaultServletName, new MockRequestDispatcher(this.defaultServletName));
 	}
 
-	@Override
 	@Deprecated
+	@Override
 	public Servlet getServlet(String name) {
 		return null;
 	}
@@ -440,7 +453,9 @@ public class MockServletContext implements ServletContext {
 			return resource.getFile().getAbsolutePath();
 		}
 		catch (IOException ex) {
-			logger.warn("Couldn't determine real path of resource " + resource, ex);
+			if (logger.isWarnEnabled()) {
+				logger.warn("Could not determine real path of resource " + resource, ex);
+			}
 			return null;
 		}
 	}
@@ -553,14 +568,34 @@ public class MockServletContext implements ServletContext {
 		return this.sessionCookieConfig;
 	}
 
-	// @Override - but only against Servlet 4.0
+	@Override  // on Servlet 4.0
 	public void setSessionTimeout(int sessionTimeout) {
 		this.sessionTimeout = sessionTimeout;
 	}
 
-	// @Override - but only against Servlet 4.0
+	@Override  // on Servlet 4.0
 	public int getSessionTimeout() {
 		return this.sessionTimeout;
+	}
+
+	@Override  // on Servlet 4.0
+	public void setRequestCharacterEncoding(String requestCharacterEncoding) {
+		this.requestCharacterEncoding = requestCharacterEncoding;
+	}
+
+	@Override  // on Servlet 4.0
+	public String getRequestCharacterEncoding() {
+		return this.requestCharacterEncoding;
+	}
+
+	@Override  // on Servlet 4.0
+	public void setResponseCharacterEncoding(String responseCharacterEncoding) {
+		this.responseCharacterEncoding = responseCharacterEncoding;
+	}
+
+	@Override  // on Servlet 4.0
+	public String getResponseCharacterEncoding() {
+		return this.responseCharacterEncoding;
 	}
 
 
@@ -573,7 +608,7 @@ public class MockServletContext implements ServletContext {
 		throw new UnsupportedOperationException();
 	}
 
-	// @Override - but only against Servlet 4.0
+	@Override  // on Servlet 4.0
 	public ServletRegistration.Dynamic addJspFile(String servletName, String jspFile) {
 		throw new UnsupportedOperationException();
 	}
